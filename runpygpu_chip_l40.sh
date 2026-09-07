@@ -20,18 +20,20 @@
 
 #SBATCH --error=slurm_chip/generic/%j.err   # STDERR output file (optional)
 
+#SBATCH --constraint='L40S|H100'
+
 
 day=$(date +'%m/%d/%Y %R')
 echo "gpu"  ${day} $SLURM_JOBID "node_list" $SLURM_NODELIST $@  "\n" >> jobs.txt
 module purge
-module load slurm/chip-gpu/23.11.4
+module load slurm/chip-gpu/23.11.11
 #module load cudnn/7.0.3
 module load   Autoconf/2.72-GCCcore-13.3.0 
 module load  CMake/3.29.3-GCCcore-13.3.0
 module load  CUDA/12.8.0  
-module load FFmpeg/7.0.2-GCCcore-13.3.0
 gcc --version
-source myenv/bin/activate
+eval "$(conda shell.bash hook)"
+conda activate p11
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64
 export TORCH_USE_CUDA_DSA="1"
 export CUDA_LAUNCH_BLOCKING="1"
@@ -46,11 +48,13 @@ export HPS_ROOT="/umbc/rs/pi_donengel/users/jbaker15/hps-cache"
 export IMAGE_REWARD_PATH="/umbc/rs/pi_donengel/users/jbaker15/reward-blob"
 export IMAGE_REWARD_CONFIG="/umbc/rs/pi_donengel/users/jbaker15/ImageReward/med_config.json"
 export BRAIN_DATA_DIR='/umbc/rs/pi_donengel/users/jbaker15/brain-diffuser/data'
+export CLIP_CACHE="/umbc/rs/pi_donengel/users/jbaker15/clip_cache"
 export CUDA_LAUNCH_BLOCKING="1"
 export SCIKIT_LEARN_DATA="/umbc/rs/pi_donengel/users/jbaker15/scikit-learn-data"
 export BRAIN_DATA_DIR="/umbc/rs/pi_donengel/users/jbaker15/brain/data"
 export TORCH_DISTRIBUTED_DEBUG="DETAIL"
 export NCCL_DEBUG="INFO"
+export TMPDIR="/umbc/rs/pi_donengel/users/jbaker15/tmp"
 export NCCL_DEBUG_SUBSYS="ALL"
 export TORCH_LOCAL_DIR="/umbc/rs/pi_donengel/users/jbaker15/local_torch"
 export KAGGLEHUB_CACHE="/umbc/rs/pi_donengel/users/jbaker15/kaggle_cache"

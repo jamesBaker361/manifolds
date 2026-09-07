@@ -8,7 +8,7 @@ import itertools
 from experiment_helpers.gpu_details import print_details
 from experiment_helpers.saving_helpers import save_and_load_functions
 from experiment_helpers.argprint import print_args
-from diffusers import DiffusionPipeline,UNet2DConditionModel,AutoencoderKL
+from diffusers import DiffusionPipeline,UNet2DConditionModel,AutoencoderKL,Krea2Pipeline
 from diffusers.image_processor import VaeImageProcessor
 from transformers import pipeline
 import torch
@@ -69,7 +69,7 @@ def main(args):
 
     prompts=[args.conjunction.join(combination) for combination in itertools.product(*prompt_categories)]
     
-    pipe=DiffusionPipeline.from_pretrained(checkpoint).to(device)
+    pipe=Krea2Pipeline.from_pretrained("krea/Krea-2-Turbo", torch_dtype=torch.bfloat16).to(device)
 
     feature_extractor=pipeline(
         task="image-feature-extraction",

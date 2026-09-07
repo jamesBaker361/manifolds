@@ -62,13 +62,14 @@ def main(args):
     repo_id : str = args.repo_id
     prompt_files=args.prompt_files
     checkpoint=args.checkpoint
+    conjunction=f" {args.conjunction} "
     
     prompt_categories=[]
     for p_file in prompt_files:
         with open(p_file,"r") as pf:
             prompt_categories.append([line.strip() for line in pf.readlines() if line.strip()])
 
-    prompts=[args.conjunction.join(combination) for combination in itertools.product(*prompt_categories)]
+    prompts=[conjunction.join(combination) for combination in itertools.product(*prompt_categories)]
     
     pipe=Krea2Pipeline.from_pretrained("krea/Krea-2-Turbo", torch_dtype=torch.bfloat16).to(device)
 

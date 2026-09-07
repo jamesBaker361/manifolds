@@ -48,10 +48,11 @@ embedding_model_checkpoints={
 parser.add_argument("--prompt_files",nargs="*",help="each of these files becomes part of the promps")
 parser.add_argument("--conjunction",type=str,default=",")
 parser.add_argument("--checkpoint",type=str,default="SimianLuo/LCM_Dreamshaper_v7")
+parser.add_argument("--num_inference_steps",type=int,default=16)
 parser.add_argument("--effects",nargs="*",help=f"effects that linearly effect images like {available_effects}")
 parser.add_argument("--embedding_model",type=str,default=DINO_V3)
 parser.add_argument("--images_per_prompt",type=int,default=5)
-parser.add_argument("--size",type=int,default=256)
+parser.add_argument("--size",type=int,default=512)
 
 def main(args):
     api,accelerator,device=repo_api_init(args)

@@ -1,4 +1,4 @@
-# turns caltech-ucsd-birds-200-2011 into a hf dataset with image, text, embedding columns
+# turns celeba-hq into a hf dataset with image, text, embedding columns
 
 import time
 import numpy as np
@@ -10,13 +10,10 @@ from experiment_helpers.argprint import print_args
 from experiment_helpers.init_helpers import default_parser, repo_api_init
 
 parser = default_parser(
-    {"repo_id":"jlbaker361/birds"}
+    {"repo_id":"jlbaker361/celeb"}
 )
 
 parser.add_argument("--embedding_model", type=str, default="facebook/dinov3-vits16-pretrain-lvd1689m")
-
-def label_to_text(label_name: str) -> str:
-    return label_name.split(".", 1)[-1].replace("_", " ").lower()
 
 def build_split(src_split, feature_extractor):
     label_names = src_split.features["label"].names
@@ -26,7 +23,7 @@ def build_split(src_split, feature_extractor):
     embedding_list = []
     for row in src_split:
         img = row["image"]
-        text = label_to_text(label_names[row["label"]])
+        text = label_names[row["label"]]
         embedding = np.mean(feature_extractor(img)[0], axis=0).tolist()
 
         images.append(img)
@@ -49,7 +46,7 @@ def main(args):
     api, accelerator, device = repo_api_init(args)
     repo_id: str = args.repo_id
 
-    src_dataset = load_dataset("bentrevett/caltech-ucsd-birds-200-2011")
+    src_dataset = load_dataset("mattymchen/celeba-hq")
 
     feature_extractor = pipeline(
         task="image-feature-extraction",
@@ -58,12 +55,12 @@ def main(args):
     )
 
     train_dataset = build_split(src_dataset["train"], feature_extractor)
-    test_dataset = build_split(src_dataset["test"], feature_extractor)
+    validation_dataset = build_split(src_dataset["validation"], feature_extractor)
 
     if accelerator.is_main_process:
         dataset = DatasetDict({
             "train": train_dataset,
-            "test": test_dataset,
+            "validation": validation_dataset,
         })
 
         dataset.push_to_hub(repo_id)

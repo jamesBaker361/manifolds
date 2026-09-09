@@ -146,8 +146,7 @@ def main(args):
     criterion=partial(mse_l1,penalty=args.l1_coeff)
     optimizer=torch.optim.Adam(sae.parameters(),lr=lr)
 
-    save,load=save_and_load_functions({"sae.pt":sae},save_dir,api,repo_id)
-    start_epoch=load(load_hf)
+    start_epoch=1
 
     sae,optimizer,train_loader,val_loader,test_loader=accelerator.prepare(
         sae,optimizer,train_loader,val_loader,test_loader
@@ -215,9 +214,6 @@ def main(args):
         if epoch%val_interval==0:
             val_metrics=epoch_pass(val_loader,False,f"epoch {epoch} val")
             accelerator.log({f"val_{key}":value for key,value in val_metrics.items()},step=epoch)
-
-        if accelerator.is_main_process:
-            save(epoch)
 
     test_metrics=epoch_pass(test_loader,False,"test")
     accelerator.log({f"test_{key}":value for key,value in test_metrics.items()})

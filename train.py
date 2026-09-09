@@ -72,7 +72,7 @@ class EmbeddingDataset(Dataset):
         self.hf_data=load_dataset(dataset_path,split="train")
         self.neighbor_indices=None
         if k_neighbors>0:
-            features=np.array(self.hf_data["features"])
+            features=np.array(self.hf_data["embedding"])
             n_neighbors=min(k_neighbors+1,len(features))
             nn=NearestNeighbors(n_neighbors=n_neighbors).fit(features)
             _,indices=nn.kneighbors(features)
@@ -86,11 +86,11 @@ class EmbeddingDataset(Dataset):
         result={
             "image":item["image"],
             "text":item["text"],
-            "embedding":torch.tensor(item["features"])
+            "embedding":torch.tensor(item["embedding"])
         }
         if self.neighbor_indices is not None:
             neighbor_rows=self.hf_data[self.neighbor_indices[index].tolist()]
-            result["neighbor_embedding"]=torch.tensor(np.array(neighbor_rows["features"]))
+            result["neighbor_embedding"]=torch.tensor(np.array(neighbor_rows["embedding"]))
         return result
 
 def collate_embeddings(batch):

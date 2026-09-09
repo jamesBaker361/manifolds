@@ -7,7 +7,6 @@ Standard (ℓ1): Sparsity weight λ ∈ 0.03, 0.04, 0.1.
 
 '''
 
-from matryoshka_sae.sae import GlobalBatchTopKMatryoshkaSAE, JumpReLUSAE, BatchTopKSAE, VanillaSAE
 import os
 import argparse
 from experiment_helpers.gpu_details import print_details
@@ -29,15 +28,18 @@ from experiment_helpers.init_helpers import default_parser,repo_api_init
 from experiment_helpers.saving_helpers import save_and_load_functions
 from sklearn.neighbors import NearestNeighbors
 from regularization import graph_laplacian,contractive,cosine_constrastive
+from overcomplete.sae import BatchTopKSAE,RAJumpSAE,JumpSAE,RATopKSAE,SAE,mse_l1
+from functools import partial
 
 TOPK="topk"
 VANILLA="vanilla"
-MATRYOSHKA="matryoshka"
-JUMP="jumprelu"
+ARCHETYPE_JUMP="archetypal_jump"
+ARCHETYPE_K="archetypal_k"
+JUMP="jump"
 
 parser=default_parser()
 parser.add_argument("--dataset_path", type=str, default="jlbaker361/model")
-parser.add_argument("--sae",type=str,default=VANILLA, help=f"one of {TOPK, VANILLA,MATRYOSHKA,JUMP}")
+parser.add_argument("--sae",type=str,default=VANILLA, help=f"one of {TOPK, VANILLA,ARCHETYPE_JUMP,JUMP}")
 parser.add_argument("--dict_size",type=int,default=None,help="sae dictionary size, defaults to 8x the embedding size")
 parser.add_argument("--top_k",type=int,default=32,help="for topk/batchtopk/matryoshka sae")
 parser.add_argument("--l1_coeff",type=float,default=0.04,help="sparsity weight for vanilla/jumprelu sae")
@@ -58,9 +60,10 @@ parser.add_argument("--k_neighbors",type=int,default=5,help="number of nearest n
 
 SAE_CLASSES={
     TOPK:BatchTopKSAE,
-    VANILLA:VanillaSAE,
-    MATRYOSHKA:GlobalBatchTopKMatryoshkaSAE,
-    JUMP:JumpReLUSAE,
+    VANILLA:SAE,
+    ARCHETYPE_JUMP:RAJumpSAE,
+    JUMP:JumpSAE,
+    ARCHETYPE_K:RATopKSAE
 }
 
 class EmbeddingDataset(Dataset):
@@ -127,29 +130,20 @@ def main(args):
     act_size=embedding_dataset[0]["embedding"].shape[-1]
     dict_size=args.dict_size if args.dict_size is not None else act_size*8
 
-    group_sizes=args.group_sizes
-    if group_sizes is None:
-        eighth=dict_size//8
-        quarter=dict_size//4
-        group_sizes=[eighth,eighth,quarter,dict_size-2*eighth-quarter]
+    sae_kwargs={"device":device}
+    if args.sae in (TOPK,ARCHETYPE_K):
+        sae_kwargs["top_k"]=args.top_k
+    if args.sae in (JUMP,ARCHETYPE_JUMP):
+        sae_kwargs["bandwidth"]=args.bandwidth
+    if args.sae in (ARCHETYPE_K,ARCHETYPE_JUMP):
+        num_points=min(len(train_split),4096)
+        point_indices=torch.randperm(len(train_split))[:num_points].tolist()
+        sae_kwargs["points"]=torch.stack(
+            [train_split[i]["embedding"] for i in point_indices]
+        ).float().to(device)
 
-    cfg={
-        "seed":123,
-        "act_size":act_size,
-        "dict_size":dict_size,
-        "device":device,
-        "dtype":torch.float32,
-        "input_unit_norm":True,
-        "l1_coeff":args.l1_coeff,
-        "top_k":args.top_k,
-        "top_k_aux":args.top_k_aux,
-        "aux_penalty":args.aux_penalty,
-        "bandwidth":args.bandwidth,
-        "n_batches_to_dead":args.n_batches_to_dead,
-        "group_sizes":group_sizes,
-    }
-
-    sae=SAE_CLASSES[args.sae](cfg)
+    sae=SAE_CLASSES[args.sae](act_size,dict_size,**sae_kwargs)
+    criterion=partial(mse_l1,penalty=args.l1_coeff)
     optimizer=torch.optim.Adam(sae.parameters(),lr=lr)
 
     save,load=save_and_load_functions({"sae.pt":sae},save_dir,api,repo_id)
@@ -163,11 +157,13 @@ def main(args):
         embedding=batch["embedding"].to(device).float()
         sae.train(train)
         with torch.set_grad_enabled(train):
-            output=sae(embedding)
-            total_loss=output["loss"]
+            pre_codes,codes,x_reconstruct=sae(embedding)
+            dictionary=accelerator.unwrap_model(sae).get_dictionary()
+            recon_loss=criterion(embedding,x_reconstruct,pre_codes,codes,dictionary)
+            output={"loss":recon_loss,"feature_acts":codes,"sae_out":x_reconstruct}
+            total_loss=recon_loss
 
             if train and args.use_contractive:
-                dictionary=accelerator.unwrap_model(sae).W_dec
                 reg=contractive(output["feature_acts"],dictionary)
                 output["contractive_loss"]=reg
                 total_loss=total_loss+args.contractive_weight*reg
@@ -175,7 +171,8 @@ def main(args):
             if train and (args.use_graph_laplacian or args.use_cosine_contrastive):
                 neighbor_embedding=batch["neighbor_embedding"].to(device).float()
                 nb,nk,nd=neighbor_embedding.shape
-                neighbor_acts=sae(neighbor_embedding.reshape(nb*nk,nd))["feature_acts"].reshape(nb,nk,-1)
+                _,neighbor_acts,_=sae(neighbor_embedding.reshape(nb*nk,nd))
+                neighbor_acts=neighbor_acts.reshape(nb,nk,-1)
 
                 if args.use_graph_laplacian:
                     reg=graph_laplacian(output["feature_acts"],neighbor_acts)
@@ -194,7 +191,6 @@ def main(args):
                 accelerator.backward(total_loss)
                 if accelerator.sync_gradients:
                     torch.nn.utils.clip_grad_norm_(sae.parameters(),args.max_grad_norm)
-                    accelerator.unwrap_model(sae).make_decoder_weights_and_grad_unit_norm()
                 optimizer.step()
                 optimizer.zero_grad()
         return output

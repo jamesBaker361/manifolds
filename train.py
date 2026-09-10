@@ -25,7 +25,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 
 from experiment_helpers.init_helpers import default_parser,repo_api_init
-from experiment_helpers.saving_helpers import save_and_load_functions
+from huggingface_hub import snapshot_download
 from sklearn.neighbors import NearestNeighbors
 from regularization import graph_laplacian,contractive,cosine_constrastive
 from overcomplete.sae import BatchTopKSAE,RAJumpSAE,JumpSAE,RATopKSAE,SAE,mse_l1
@@ -146,11 +146,36 @@ def main(args):
     criterion=partial(mse_l1,penalty=args.l1_coeff)
     optimizer=torch.optim.Adam(sae.parameters(),lr=lr)
 
-    start_epoch=1
+    class EpochState:
+        def __init__(self):
+            self.epoch=1
+        def state_dict(self):
+            return {"epoch":self.epoch}
+        def load_state_dict(self,state_dict):
+            self.epoch=state_dict["epoch"]
+
+    epoch_state=EpochState()
+    checkpoint_dir=os.path.join(save_dir,"checkpoint")
+
+    if load_hf:
+        try:
+            snapshot_download(repo_id,allow_patterns="checkpoint/*",local_dir=save_dir)
+        except Exception as e:
+            print(f"failed to download checkpoint: {e}")
 
     sae,optimizer,train_loader,val_loader,test_loader=accelerator.prepare(
         sae,optimizer,train_loader,val_loader,test_loader
     )
+    accelerator.register_for_checkpointing(epoch_state)
+
+    start_epoch=1
+    if os.path.isdir(checkpoint_dir) and len(os.listdir(checkpoint_dir))>0:
+        try:
+            accelerator.load_state(checkpoint_dir)
+            start_epoch=epoch_state.epoch+1
+            print(f"resumed from checkpoint at epoch {start_epoch}")
+        except Exception as e:
+            print(f"failed to load checkpoint: {e}")
 
     def run_batch(batch,train:bool):
         embedding=batch["embedding"].to(device).float()
@@ -214,6 +239,14 @@ def main(args):
         if epoch%val_interval==0:
             val_metrics=epoch_pass(val_loader,False,f"epoch {epoch} val")
             accelerator.log({f"val_{key}":value for key,value in val_metrics.items()},step=epoch)
+
+        epoch_state.epoch=epoch
+        accelerator.save_state(checkpoint_dir)
+        if accelerator.is_main_process:
+            try:
+                api.upload_folder(repo_id=repo_id,folder_path=checkpoint_dir,path_in_repo="checkpoint")
+            except Exception as e:
+                print(f"failed to upload checkpoint: {e}")
 
     test_metrics=epoch_pass(test_loader,False,"test")
     accelerator.log({f"test_{key}":value for key,value in test_metrics.items()})

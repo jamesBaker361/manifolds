@@ -1,3 +1,6 @@
 [submodule "experiment_helpers"]
 	path = experiment_helpers
 	url = https://github.com/jamesBaker361/experiment_helpers.git
+[submodule "saev_repo"]
+	path = saev_repo
+	url = https://github.com/Imageomics/saev.git

@@ -28,7 +28,8 @@ def _detect_elbow(curve, min_k=1):
     if line_len < 1e-10:
         return n - 1
     line_unit = line_vec / line_len
-    dists = np.abs(np.cross(line_unit, p0 - np.column_stack([x, y])))
+    offsets = p0 - np.column_stack([x, y])
+    dists = np.abs(line_unit[0] * offsets[:, 1] - line_unit[1] * offsets[:, 0])
     dists[:min_k] = -1
     return int(np.argmax(dists))
 

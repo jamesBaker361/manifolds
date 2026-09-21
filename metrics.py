@@ -8,7 +8,6 @@ from pathlib import Path
 import torch
 import numpy as np
 from sklearn.decomposition import PCA
-from overcomplete.sae import SAE
 
 def _detect_elbow(curve, min_k=1):
     """Maximum-distance-to-chord elbow detector on a monotone curve.
@@ -85,13 +84,27 @@ def find_support_greedy(activations, decoder, max_k=100, var_threshold=0.95):
     return np.array(selected_global), var_curve, elbow_k
 
 
+def _get_dictionary(sae):
+    """Returns the decoder atoms as a [d_sae, d_model] tensor.
+
+    Works with both overcomplete.sae.SAE (has get_dictionary()) and
+    saev.nn.modeling.SparseAutoencoder (exposes W_dec directly).
+    """
+    if hasattr(sae, "get_dictionary"):
+        return sae.get_dictionary()
+    return sae.W_dec
+
+
 def get_R2(data,
-            sae:SAE,
+            sae,
              max_k=100,
              var_threshold=0.95
             ):
+    """Subspace-capture R2. `sae` can be an overcomplete.sae.SAE or a
+    saev.nn.modeling.SparseAutoencoder; both expose an `.encode(x)` that
+    unpacks to (pre_codes, codes)."""
     _,codes=sae.encode(data)
-    decoder = sae.get_dictionary()
+    decoder = _get_dictionary(sae)
     selected_global,var_curve, elbow_k =find_support_greedy(data,decoder,max_k,var_threshold)
     codes_selected=codes[:,selected_global]
     data_selected= codes_selected @ decoder[selected_global,:]

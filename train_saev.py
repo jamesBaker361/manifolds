@@ -54,6 +54,7 @@ parser.add_argument("--use_cosine_contrastive", action="store_true", help="like 
 parser.add_argument("--cosine_contrastive_weight", type=float, default=0.01)
 parser.add_argument("--k_neighbors", type=int, default=5, help="number of nearest neighbors precomputed for graph_laplacian/cosine_contrastive")
 parser.add_argument("--knn_pool_size", type=int, default=2048, help="number of activations randomly sampled once (via random access into the training shards) to build the neighbor pool for graph_laplacian/cosine_contrastive")
+parser.add_argument("--knn_cache_dir", type=str, default=None, help="where to cache the sampled neighbor pool + neighbor indices on disk, so repeated runs skip resampling/refitting; defaults to <save_dir>/knn_cache")
 
 parser.add_argument("--eval_r2", action="store_true", help="compute metrics.get_R2 subspace-capture score on validation data")
 parser.add_argument("--r2_n_samples", type=int, default=2000, help="number of validation activations used for the r2 metric")
@@ -71,21 +72,21 @@ def make_activation_cfg(args):
     raise ValueError(f"unknown activation {args.activation}, must be one of {ACTIVATIONS}")
 
 
-class MetricsSAEAdapter:
-    """Adapts a saev SparseAutoencoder to the interface metrics.get_R2 expects (overcomplete.sae.SAE-shaped)."""
-
-    def __init__(self, sae):
-        self._sae = sae
-
-    def encode(self, x):
-        enc = self._sae.encode(x)
-        return enc.h_x, enc.f_x
-
-    def get_dictionary(self):
-        return self._sae.W_dec
+def _knn_cache_path(cache_dir, shards_dir, layer, pool_size, k_neighbors):
+    # saev shard directories are already named by a content hash of their config,
+    # so that name plus our own sampling knobs fully determines the cached pool.
+    shard_hash = pathlib.Path(shards_dir).name
+    fname = f"{shard_hash}_layer{layer}_pool{pool_size}_k{k_neighbors}.pt"
+    return pathlib.Path(cache_dir) / fname
 
 
-def build_knn_pool(shards_dir, layer, pool_size, k_neighbors, device):
+def build_knn_pool(shards_dir, layer, pool_size, k_neighbors, device, cache_dir=None):
+    cache_path = _knn_cache_path(cache_dir, shards_dir, layer, pool_size, k_neighbors) if cache_dir else None
+    if cache_path is not None and cache_path.exists():
+        cached = torch.load(cache_path, map_location="cpu")
+        print(f"loaded knn pool from cache: {cache_path}")
+        return cached["acts"].to(device), cached["neighbor_indices"].to(device)
+
     cfg = saev.data.IndexedConfig(shards=pathlib.Path(shards_dir), layer=layer)
     dataset = saev.data.IndexedDataset(cfg)
     n = min(pool_size, len(dataset))
@@ -94,10 +95,18 @@ def build_knn_pool(shards_dir, layer, pool_size, k_neighbors, device):
 
     n_neighbors = min(k_neighbors + 1, len(acts))
     nn = NearestNeighbors(n_neighbors=n_neighbors).fit(acts.numpy())
-    _, neighbor_indices = nn.kneighbors(acts.numpy())
-    neighbor_indices = neighbor_indices[:, 1:]
+    _, neighbor_indices_np = nn.kneighbors(acts.numpy())
+    neighbor_indices = torch.tensor(neighbor_indices_np[:, 1:], dtype=torch.long)
 
-    return acts.to(device), torch.tensor(neighbor_indices, dtype=torch.long, device=device)
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"acts": acts, "neighbor_indices": neighbor_indices}, cache_path)
+            print(f"cached knn pool to: {cache_path}")
+        except OSError as e:
+            print(f"failed to cache knn pool: {e}")
+
+    return acts.to(device), neighbor_indices.to(device)
 
 
 def main(args):
@@ -131,7 +140,8 @@ def main(args):
 
     knn_pool = None
     if use_neighbors:
-        knn_pool = build_knn_pool(args.train_shards, args.train_layer, args.knn_pool_size, args.k_neighbors, device)
+        knn_cache_dir = args.knn_cache_dir or os.path.join(save_dir, "knn_cache")
+        knn_pool = build_knn_pool(args.train_shards, args.train_layer, args.knn_pool_size, args.k_neighbors, device, cache_dir=knn_cache_dir)
 
     optimizer = torch.optim.Adam(sae.parameters(), lr=lr)
 
@@ -241,7 +251,7 @@ def main(args):
         unwrapped_sae = accelerator.unwrap_model(sae)
         unwrapped_sae.train(False)
         with torch.no_grad():
-            r2 = metrics.get_R2(data, MetricsSAEAdapter(unwrapped_sae), max_k=args.r2_max_k, var_threshold=args.r2_var_threshold)
+            r2 = metrics.get_R2(data, unwrapped_sae, max_k=args.r2_max_k, var_threshold=args.r2_var_threshold)
         return float(r2.item())
 
     for epoch in range(start_epoch, epochs + 1):

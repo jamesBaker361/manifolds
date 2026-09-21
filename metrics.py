@@ -47,6 +47,7 @@ def find_support_greedy(activations, decoder, max_k=100, var_threshold=0.95):
     if total_ss < 1e-10:
         return np.array([], dtype=int), np.array([]), 0
 
+    decoder = np.asarray(decoder, dtype=np.float32)
     candidates = np.arange(decoder.shape[0])
     D_cand = decoder[candidates]
     d_norms_sq = (D_cand ** 2).sum(1)
@@ -88,9 +89,9 @@ def get_R2(data,
              max_k=100,
              var_threshold=0.95
             ):
-    codes=sae.encode(data)
+    _,codes=sae.encode(data)
     decoder = sae.get_dictionary()
-    selected_global,var_curve, elbow_k =find_support_greedy(codes,decoder,max_k,var_threshold)
+    selected_global,var_curve, elbow_k =find_support_greedy(data,decoder,max_k,var_threshold)
     codes_selected=codes[:,selected_global]
     data_selected= codes_selected @ decoder[selected_global,:]
 

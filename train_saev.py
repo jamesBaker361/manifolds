@@ -29,11 +29,26 @@ TOPK = "topk"
 BATCH_TOPK = "batchtopk"
 ACTIVATIONS = [RELU, TOPK, BATCH_TOPK]
 
+FAMILIES = ["bird-mae", "clip", "dinov2", "dinov3", "fake-clip", "pe-core", "pe-spatial", "siglip"]
+
 parser = default_parser()
-parser.add_argument("--train_shards", type=str, required=True, help="directory with saev activation shards for training")
-parser.add_argument("--train_layer", type=int, default=-1, help="which ViT layer to read from the training shards")
-parser.add_argument("--val_shards", type=str, default=None, help="directory with saev activation shards for validation")
-parser.add_argument("--val_layer", type=int, default=-1, help="which ViT layer to read from the validation shards")
+parser.add_argument("--train_shards", type=str, default="training_shards", help="directory with saev activation shards for training; if missing/unset, shards are generated from --dataset_name/--dataset_split")
+parser.add_argument("--train_layer", type=int, default=13, help="which ViT layer to read from the training shards (also the layer captured when generating shards)")
+parser.add_argument("--val_shards", type=str, default=None, help="directory with saev activation shards for validation; if set but missing, shards are generated from --val_dataset_name/--val_dataset_split")
+parser.add_argument("--val_layer", type=int, default=13, help="which ViT layer to read from the validation shards (also the layer captured when generating shards)")
+
+parser.add_argument("--dataset_name", type=str, default=None, help="HF dataset repo (with image + label ClassLabel columns) to compute training shards from, if --train_shards doesn't already exist")
+parser.add_argument("--dataset_split", type=str, default="train", help="split of --dataset_name to use for training shards")
+parser.add_argument("--val_dataset_name", type=str, default=None, help="HF dataset repo to compute validation shards from, if --val_shards is set but doesn't already exist")
+parser.add_argument("--val_dataset_split", type=str, default="validation", help="split of --val_dataset_name to use for validation shards")
+parser.add_argument("--family", type=str, default="dinov3", help=f"ViT family used when generating shards, one of {FAMILIES}")
+parser.add_argument("--checkpoint", type=str, default="dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth", help="ViT checkpoint used when generating shards; for family=dinov3 this must be a local path to Meta's original .pth checkpoint, not a transformers-format hub id")
+parser.add_argument("--vit_d_model", type=int, default=1280, help="ViT activation dimension used when generating shards (1280 for dinov3 vith16plus)")
+parser.add_argument("--content_tokens_per_example", type=int, default=196, help="number of content (non-CLS) tokens per example used when generating shards (14x14 for a 224px/16px-patch ViT)")
+parser.add_argument("--shards_root", type=str, default="saev_shards", help="root directory that generated train/val shards are written under")
+parser.add_argument("--vit_batch_size", type=int, default=256, help="batch size for ViT inference when generating shards")
+parser.add_argument("--n_shard_workers", type=int, default=8, help="number of dataloader workers when generating shards")
+parser.add_argument("--max_tokens_per_shard", type=int, default=2_400_000, help="maximum activations per shard file when generating shards")
 
 parser.add_argument("--activation", type=str, default=TOPK, help=f"one of {ACTIVATIONS}")
 parser.add_argument("--d_sae", type=int, default=None, help="sae dictionary size, defaults to 8x the activation size")
@@ -70,6 +85,57 @@ def make_activation_cfg(args):
     if args.activation == BATCH_TOPK:
         return modeling.BatchTopK(top_k=args.top_k, momentum=args.batch_top_k_momentum, aux=modeling.AuxK(k_aux=args.k_aux, alpha=args.aux_alpha))
     raise ValueError(f"unknown activation {args.activation}, must be one of {ACTIVATIONS}")
+
+
+def generate_shards(args, dataset_name, dataset_split, layer, shards_subdir, device):
+    """Computes and saves ViT activation shards, returning the resulting shard directory.
+
+    saev_repo's dinov3 loader (saev.data.dinov3.Vit) expects a local file in Meta's
+    original DINOv3 release format (e.g. 'dinov3_vitl16_pretrain_lvd1689m-<hash>.pth').
+    A transformers-format hub checkpoint like facebook/dinov3-vitl16-pretrain-lvd1689m
+    has a different state_dict layout (HF's own reimplementation) and can't be loaded
+    by it directly, so we fail fast here instead of deep inside saev's own loader.
+    """
+    if args.family == "dinov3" and not os.path.isfile(args.checkpoint):
+        raise ValueError(
+            f"--family dinov3 needs --checkpoint to be a local path to Meta's original "
+            f"DINOv3 checkpoint (e.g. 'dinov3_vitl16_pretrain_lvd1689m-<hash>.pth'), got "
+            f"'{args.checkpoint}'. The Hugging Face repo facebook/dinov3-vitl16-pretrain-lvd1689m "
+            "is a transformers-format safetensors checkpoint with a different state_dict layout "
+            "than saev_repo's from-scratch DINOv3 implementation, so it can't be loaded as-is. "
+            "Download the original weights from Meta's DINOv3 release "
+            "(https://ai.meta.com/resources/models-and-libraries/dinov3-license) and point "
+            "--checkpoint at that local .pth file instead."
+        )
+
+    assert dataset_name is not None, "need --dataset_name (or --val_dataset_name) to generate shards"
+
+    from saev.data import shards as saev_shards
+
+    shards_root = pathlib.Path(args.shards_root) / shards_subdir / "shards"
+    shards_root.mkdir(parents=True, exist_ok=True)
+
+    return saev_shards.worker_fn(
+        data=saev.data.datasets.Imagenet(name=dataset_name, split=dataset_split),
+        family=args.family,
+        ckpt=args.checkpoint,
+        d_model=args.vit_d_model,
+        layers=[layer],
+        content_tokens_per_example=args.content_tokens_per_example,
+        cls_token=True,
+        max_tokens_per_shard=args.max_tokens_per_shard,
+        batch_size=args.vit_batch_size,
+        n_workers=args.n_shard_workers,
+        device=str(device),
+        shards_root=shards_root,
+    )
+
+
+def resolve_shards(shards_arg, dataset_name, dataset_split, layer, shards_subdir, args, device):
+    if shards_arg and os.path.isdir(shards_arg):
+        return pathlib.Path(shards_arg)
+    print(f"no shards at '{shards_arg}', generating from {dataset_name} ({dataset_split})...")
+    return generate_shards(args, dataset_name, dataset_split, layer, shards_subdir, device)
 
 
 def _knn_cache_path(cache_dir, shards_dir, layer, pool_size, k_neighbors):
@@ -121,13 +187,16 @@ def main(args):
     load_hf = args.load_hf
     use_neighbors = args.use_graph_laplacian or args.use_cosine_contrastive
 
-    train_cfg = saev.data.ShuffledConfig(shards=pathlib.Path(args.train_shards), layer=args.train_layer, batch_size=batch_size)
+    train_shards_dir = resolve_shards(args.train_shards, args.dataset_name, args.dataset_split, args.train_layer, "train", args, device)
+    train_cfg = saev.data.ShuffledConfig(shards=train_shards_dir, layer=args.train_layer, batch_size=batch_size)
     train_loader = saev.data.ShuffledDataLoader(train_cfg)
     d_model = train_loader.metadata.d_model
 
     val_loader = None
-    if args.val_shards:
-        val_cfg = saev.data.ShuffledConfig(shards=pathlib.Path(args.val_shards), layer=args.val_layer, batch_size=batch_size)
+    val_shards_dir = None
+    if args.val_shards or args.val_dataset_name:
+        val_shards_dir = resolve_shards(args.val_shards, args.val_dataset_name, args.val_dataset_split, args.val_layer, "val", args, device)
+        val_cfg = saev.data.ShuffledConfig(shards=val_shards_dir, layer=args.val_layer, batch_size=batch_size)
         val_loader = saev.data.ShuffledDataLoader(val_cfg)
 
     d_sae = args.d_sae if args.d_sae is not None else d_model * 8
@@ -141,7 +210,7 @@ def main(args):
     knn_pool = None
     if use_neighbors:
         knn_cache_dir = args.knn_cache_dir or os.path.join(save_dir, "knn_cache")
-        knn_pool = build_knn_pool(args.train_shards, args.train_layer, args.knn_pool_size, args.k_neighbors, device, cache_dir=knn_cache_dir)
+        knn_pool = build_knn_pool(train_shards_dir, args.train_layer, args.knn_pool_size, args.k_neighbors, device, cache_dir=knn_cache_dir)
 
     optimizer = torch.optim.Adam(sae.parameters(), lr=lr)
 

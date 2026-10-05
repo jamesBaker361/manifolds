@@ -87,6 +87,34 @@ def make_activation_cfg(args):
     raise ValueError(f"unknown activation {args.activation}, must be one of {ACTIVATIONS}")
 
 
+def materialize_imgfolder(dataset_name, dataset_split, images_root):
+    """Downloads an HF dataset's 'image' column into a local root/all/*.jpg layout.
+
+    saev_repo's dataset configs are a closed set (saev.data.datasets.Config), and
+    none of them read an arbitrary HF dataset by image alone -- Imagenet/Cifar10
+    require a classification label, which datasets like ADE20K don't have. Rather
+    than extend saev_repo itself, we materialize the images into the local-folder
+    layout saev.data.datasets.ImgFolder already supports ("if you don't have a
+    class structure, add a dummy 'all' folder"), so no submodule changes are needed.
+    """
+    class_dir = images_root / "all"
+    if class_dir.is_dir() and any(class_dir.iterdir()):
+        print(f"reusing materialized images at {class_dir}")
+        return images_root
+
+    import datasets as hf_datasets
+
+    class_dir.mkdir(parents=True, exist_ok=True)
+    hf_dataset = hf_datasets.load_dataset(dataset_name, split=dataset_split)
+    print(f"materializing {len(hf_dataset)} images from {dataset_name} ({dataset_split}) to {class_dir}")
+    for i, row in enumerate(hf_dataset):
+        row["image"].convert("RGB").save(class_dir / f"{i:08d}.jpg")
+        if i % 1000 == 0:
+            print(f"  materialized {i}/{len(hf_dataset)}")
+
+    return images_root
+
+
 def generate_shards(args, dataset_name, dataset_split, layer, shards_subdir, device):
     """Computes and saves ViT activation shards, returning the resulting shard directory.
 
@@ -112,11 +140,16 @@ def generate_shards(args, dataset_name, dataset_split, layer, shards_subdir, dev
 
     from saev.data import shards as saev_shards
 
-    shards_root = pathlib.Path(args.shards_root) / shards_subdir / "shards"
+    # saev.disk.is_shards_root requires the directory's last two path components
+    # to be literally ("saev", "shards").
+    shards_root = pathlib.Path(args.shards_root) / shards_subdir / "saev" / "shards"
     shards_root.mkdir(parents=True, exist_ok=True)
 
+    images_root = pathlib.Path(args.shards_root) / shards_subdir / "images"
+    materialize_imgfolder(dataset_name, dataset_split, images_root)
+
     return saev_shards.worker_fn(
-        data=saev.data.datasets.Imagenet(name=dataset_name, split=dataset_split),
+        data=saev.data.datasets.ImgFolder(root=images_root),
         family=args.family,
         ckpt=args.checkpoint,
         d_model=args.vit_d_model,

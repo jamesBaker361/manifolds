@@ -221,6 +221,7 @@ def main(args):
     use_neighbors = args.use_graph_laplacian or args.use_cosine_contrastive
 
     train_shards_dir = resolve_shards(args.train_shards, args.dataset_name, args.dataset_split, args.train_layer, "train", args, device)
+    print(f"RESOLVED_TRAIN_SHARDS={train_shards_dir}")
     train_cfg = saev.data.ShuffledConfig(shards=train_shards_dir, layer=args.train_layer, batch_size=batch_size)
     train_loader = saev.data.ShuffledDataLoader(train_cfg)
     d_model = train_loader.metadata.d_model
@@ -229,6 +230,7 @@ def main(args):
     val_shards_dir = None
     if args.val_shards or args.val_dataset_name:
         val_shards_dir = resolve_shards(args.val_shards, args.val_dataset_name, args.val_dataset_split, args.val_layer, "val", args, device)
+        print(f"RESOLVED_VAL_SHARDS={val_shards_dir}")
         val_cfg = saev.data.ShuffledConfig(shards=val_shards_dir, layer=args.val_layer, batch_size=batch_size)
         val_loader = saev.data.ShuffledDataLoader(val_cfg)
 

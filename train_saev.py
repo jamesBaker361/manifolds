@@ -39,7 +39,7 @@ parser.add_argument("--val_layer", type=int, default=13, help="which ViT layer t
 
 parser.add_argument("--dataset_name", type=str, default="1aurent/ADE20K", help="HF dataset repo (with image + label ClassLabel columns) to compute training shards from, if --train_shards doesn't already exist")
 parser.add_argument("--dataset_split", type=str, default="train", help="split of --dataset_name to use for training shards")
-parser.add_argument("--val_dataset_name", type=str, default="1aurent/ADE20K", help="HF dataset repo to compute validation shards from, if --val_shards is set but doesn't already exist")
+parser.add_argument("--val_dataset_name", type=str, default=None, help="HF dataset repo to compute validation shards from, if --val_shards is set but doesn't already exist; validation is skipped entirely if this and --val_shards are both unset, so it never silently defaults to a different dataset than --dataset_name")
 parser.add_argument("--val_dataset_split", type=str, default="validation", help="split of --val_dataset_name to use for validation shards")
 parser.add_argument("--family", type=str, default="dinov3", help=f"ViT family used when generating shards, one of {FAMILIES}")
 parser.add_argument("--checkpoint", type=str, default="dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth", help="ViT checkpoint used when generating shards; for family=dinov3 this must be a local path to Meta's original .pth checkpoint, not a transformers-format hub id. saev_repo's encoder only implements the plain-mlp dinov3 variants (vits16/vitb16/vitl16) -- the 'plus'/7b variants use a swiglu ffn it doesn't support.")
@@ -394,7 +394,6 @@ if __name__ == '__main__':
     print_details()
     start = time.time()
     args = parser.parse_args()
-    print_args(parser)
     print(args)
     main(args)
     end = time.time()

@@ -51,16 +51,16 @@ def main(args):
 
     src_dataset = load_dataset("bentrevett/caltech-ucsd-birds-200-2011")
 
-    feature_extractor = pipeline(
-        task="image-feature-extraction",
-        model=args.embedding_model,
-        device=device
-    )
-
-    train_dataset = build_split(src_dataset["train"], feature_extractor)
-    test_dataset = build_split(src_dataset["test"], feature_extractor)
-
     if accelerator.is_main_process:
+        feature_extractor = pipeline(
+            task="image-feature-extraction",
+            model=args.embedding_model,
+            device=device
+        )
+
+        train_dataset = build_split(src_dataset["train"], feature_extractor)
+        test_dataset = build_split(src_dataset["test"], feature_extractor)
+
         dataset = DatasetDict({
             "train": train_dataset,
             "test": test_dataset,
@@ -73,7 +73,6 @@ if __name__ == '__main__':
     print_details()
     start = time.time()
     args = parser.parse_args()
-    print_args(parser)
     print(args)
     main(args)
     end = time.time()

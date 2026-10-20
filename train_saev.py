@@ -3,6 +3,7 @@
 
 import os
 import sys
+import json
 import pathlib
 import time
 from collections import defaultdict
@@ -76,6 +77,8 @@ parser.add_argument("--r2_n_samples", type=int, default=2000, help="number of va
 parser.add_argument("--r2_max_k", type=int, default=100)
 parser.add_argument("--r2_var_threshold", type=float, default=0.95)
 
+parser.add_argument("--outputs_dir", type=str, default="outputs", help="directory to append one metrics row per epoch to (as JSONL), for later cross-run comparison via compare_metrics.ipynb")
+
 
 def make_activation_cfg(args):
     if args.activation == RELU:
@@ -85,6 +88,34 @@ def make_activation_cfg(args):
     if args.activation == BATCH_TOPK:
         return modeling.BatchTopK(top_k=args.top_k, momentum=args.batch_top_k_momentum, aux=modeling.AuxK(k_aux=args.k_aux, alpha=args.aux_alpha))
     raise ValueError(f"unknown activation {args.activation}, must be one of {ACTIVATIONS}")
+
+
+def run_config(args, d_sae):
+    """The fields compare_metrics.ipynb indexes runs by, plus a few extras for context."""
+    return {
+        "repo_id": args.repo_id,
+        "lr": args.lr,
+        "sae_type": args.activation,
+        "dict_size": d_sae,
+        "use_graph_laplacian": args.use_graph_laplacian,
+        "use_contractive": args.use_contractive,
+        "use_cosine_contrastive": args.use_cosine_contrastive,
+        "dataset_name": args.dataset_name,
+        "val_dataset_name": args.val_dataset_name,
+    }
+
+
+def outputs_path(outputs_dir, repo_id):
+    safe_name = repo_id.replace("/", "_")
+    return pathlib.Path(outputs_dir) / f"{safe_name}.jsonl"
+
+
+def log_outputs_row(outputs_dir, config, row):
+    """Appends one JSON line (config fields + row fields) to outputs/<repo_id>.jsonl."""
+    path = outputs_path(outputs_dir, config["repo_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps({**config, **row}) + "\n")
 
 
 def materialize_imgfolder(dataset_name, dataset_split, images_root):
@@ -235,6 +266,7 @@ def main(args):
         val_loader = saev.data.ShuffledDataLoader(val_cfg)
 
     d_sae = args.d_sae if args.d_sae is not None else d_model * 8
+    config = run_config(args, d_sae)
     activation_cfg = make_activation_cfg(args)
     sae_cfg = modeling.SparseAutoencoderConfig(d_model=d_model, d_sae=d_sae, activation=activation_cfg)
     sae = modeling.SparseAutoencoder(sae_cfg)
@@ -359,16 +391,24 @@ def main(args):
         return float(r2.item())
 
     for epoch in range(start_epoch, epochs + 1):
+        row = {"epoch": epoch, "is_final_test": False}
+
         train_metrics = epoch_pass(train_loader, True)
         accelerator.log({f"train_{key}": value for key, value in train_metrics.items()}, step=epoch)
+        row.update({f"train_{key}": value for key, value in train_metrics.items()})
 
         if val_loader is not None and epoch % val_interval == 0:
             val_metrics = epoch_pass(val_loader, False)
             accelerator.log({f"val_{key}": value for key, value in val_metrics.items()}, step=epoch)
+            row.update({f"val_{key}": value for key, value in val_metrics.items()})
 
             if args.eval_r2:
                 r2 = eval_r2(val_loader)
                 accelerator.log({"val_r2": r2}, step=epoch)
+                row["val_r2"] = r2
+
+        if accelerator.is_main_process:
+            log_outputs_row(args.outputs_dir, config, row)
 
         epoch_state.epoch = epoch
         accelerator.save_state(checkpoint_dir)
@@ -381,6 +421,10 @@ def main(args):
     if val_loader is not None:
         test_metrics = epoch_pass(val_loader, False)
         accelerator.log({f"test_{key}": value for key, value in test_metrics.items()})
+        if accelerator.is_main_process:
+            test_row = {"epoch": epochs, "is_final_test": True}
+            test_row.update({f"test_{key}": value for key, value in test_metrics.items()})
+            log_outputs_row(args.outputs_dir, config, test_row)
 
     accelerator.end_training()
 

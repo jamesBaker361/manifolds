@@ -8,6 +8,7 @@ Standard (ℓ1): Sparsity weight λ ∈ 0.03, 0.04, 0.1.
 '''
 
 import os
+import json
 import argparse
 from experiment_helpers.gpu_details import print_details
 from experiment_helpers.argprint import print_args
@@ -58,6 +59,8 @@ parser.add_argument("--use_cosine_contrastive",action="store_true",help="like gr
 parser.add_argument("--cosine_contrastive_weight",type=float,default=0.01)
 parser.add_argument("--k_neighbors",type=int,default=5,help="number of nearest neighbors (in raw embedding space) precomputed for graph_laplacian/cosine_contrastive")
 
+parser.add_argument("--outputs_dir",type=str,default="evaluation/outputs",help="directory to append one metrics row per epoch to (as JSONL), for later cross-run comparison via evaluation/compare_baselines.ipynb")
+
 SAE_CLASSES={
     TOPK:BatchTopKSAE,
     VANILLA:SAE,
@@ -104,6 +107,33 @@ def collate_embeddings(batch):
     return result
 
 
+def run_config(args,dict_size):
+    """The fields evaluation/compare_baselines.ipynb indexes runs by, plus a few extras for context."""
+    return {
+        "repo_id":args.repo_id,
+        "lr":args.lr,
+        "sae_type":args.sae,
+        "dict_size":dict_size,
+        "use_graph_laplacian":args.use_graph_laplacian,
+        "use_contractive":args.use_contractive,
+        "use_cosine_contrastive":args.use_cosine_contrastive,
+        "dataset_path":args.dataset_path,
+    }
+
+
+def outputs_path(outputs_dir,repo_id):
+    safe_name=repo_id.replace("/","_")
+    return os.path.join(outputs_dir,f"{safe_name}.jsonl")
+
+
+def log_outputs_row(outputs_dir,config,row):
+    """Appends one JSON line (config fields + row fields) to <outputs_dir>/<repo_id>.jsonl."""
+    path=outputs_path(outputs_dir,config["repo_id"])
+    os.makedirs(os.path.dirname(path),exist_ok=True)
+    with open(path,"a") as f:
+        f.write(json.dumps({**config,**row})+"\n")
+
+
 def main(args):
     api,accelerator,device=repo_api_init(args)
     mixed_precision : str = args.mixed_precision
@@ -129,6 +159,7 @@ def main(args):
 
     act_size=embedding_dataset[0]["embedding"].shape[-1]
     dict_size=args.dict_size if args.dict_size is not None else act_size*8
+    config=run_config(args,dict_size)
 
     sae_kwargs={"device":device}
     if args.sae in (TOPK,ARCHETYPE_K):
@@ -233,12 +264,19 @@ def main(args):
         return {key:float(np.mean(values)) for key,values in metrics.items()}
 
     for epoch in range(start_epoch,epochs+1):
+        row={"epoch":epoch,"is_final_test":False}
+
         train_metrics=epoch_pass(train_loader,True,f"epoch {epoch} train")
         accelerator.log({f"train_{key}":value for key,value in train_metrics.items()},step=epoch)
+        row.update({f"train_{key}":value for key,value in train_metrics.items()})
 
         if epoch%val_interval==0:
             val_metrics=epoch_pass(val_loader,False,f"epoch {epoch} val")
             accelerator.log({f"val_{key}":value for key,value in val_metrics.items()},step=epoch)
+            row.update({f"val_{key}":value for key,value in val_metrics.items()})
+
+        if accelerator.is_main_process:
+            log_outputs_row(args.outputs_dir,config,row)
 
         epoch_state.epoch=epoch
         accelerator.save_state(checkpoint_dir)
@@ -250,6 +288,10 @@ def main(args):
 
     test_metrics=epoch_pass(test_loader,False,"test")
     accelerator.log({f"test_{key}":value for key,value in test_metrics.items()})
+    if accelerator.is_main_process:
+        test_row={"epoch":epochs,"is_final_test":True}
+        test_row.update({f"test_{key}":value for key,value in test_metrics.items()})
+        log_outputs_row(args.outputs_dir,config,test_row)
 
     accelerator.end_training()
 
